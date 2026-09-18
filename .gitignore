@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+venv/
+.venv/
+env/
+.env/
+
+# Datasets & Extracted Features
+keypoint_data/
+greetings_data/
+raw_dataset/
+downloads/
+
+# Large Model Checkpoints & Binary Weights (trainable via train.py)
+*.h5
+*.keras
+
+# Runtime Session Transcripts
+transcripts/*.srt
+transcripts/*.txt
+!transcripts/.gitkeep
+
+# AI Agent & Assistant Caches
+.agents/
+.claude/
+
+# IDE & OS Caches
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
