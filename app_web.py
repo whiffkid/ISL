@@ -244,7 +244,7 @@ def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
         st.session_state.learn_sym_idx = 0
 
     with col_prev:
-        if st.button("Prev", icon=":material/arrow_back:", width="stretch", help="Previous hand signal"):
+        if st.button("Prev", icon=":material/arrow_back:", help="Previous hand signal"):
             curr_idx = (curr_idx - 1) % len(symbols_in_cat)
             st.session_state.learn_sym_idx = curr_idx
             st.rerun()
@@ -265,7 +265,7 @@ def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
             selected_symbol = symbols_in_cat[curr_idx]
 
     with col_next:
-        if st.button("Next", icon=":material/arrow_forward:", width="stretch", help="Next hand signal"):
+        if st.button("Next", icon=":material/arrow_forward:", help="Next hand signal"):
             curr_idx = (curr_idx + 1) % len(symbols_in_cat)
             st.session_state.learn_sym_idx = curr_idx
             st.rerun()
@@ -398,7 +398,7 @@ def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
 
                         # Convert to RGB and display frame
                         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                        tutor_frame_window.image(image_rgb, channels="RGB", width="stretch")
+                        tutor_frame_window.image(image_rgb, channels="RGB", use_container_width=True)
 
                         # Update Accuracy Progress Bar
                         score_progress.progress(int(acc), text=f"Posture accuracy: {int(acc)}% ({status})")
@@ -581,14 +581,14 @@ def main():
 
                 # Quick Actions Bar
                 act_col1, act_col2, act_col3 = st.columns(3)
-                if act_col1.button("Backspace", icon=":material/backspace:", width="stretch"):
+                if act_col1.button("Backspace", icon=":material/backspace:"):
                     spell_engine.backspace()
                     st.rerun()
-                if act_col2.button("Add space", icon=":material/space_bar:", width="stretch"):
+                if act_col2.button("Add space", icon=":material/space_bar:"):
                     if spell_engine.current_word and not spell_engine.current_word.endswith(" "):
                         spell_engine.current_word += " "
                     st.rerun()
-                if act_col3.button("Clear session", icon=":material/delete:", width="stretch"):
+                if act_col3.button("Clear session", icon=":material/delete:"):
                     st.session_state.session_words = []
                     spell_engine.clear()
                     st.session_state.last_sentence = ""
@@ -636,8 +636,7 @@ def main():
                         icon=":material/subtitles:",
                         data=srt_data,
                         file_name="isl_subtitles.srt",
-                        mime="text/plain",
-                        width="stretch"
+                        mime="text/plain"
                     )
 
                     txt_data = f"=== ISL Translation Session Transcript ===\n\n"
@@ -649,8 +648,7 @@ def main():
                         icon=":material/description:",
                         data=txt_data,
                         file_name="isl_transcript.txt",
-                        mime="text/plain",
-                        width="stretch"
+                        mime="text/plain"
                     )
                 else:
                     st.caption("Recognized sentences will automatically be recorded here.")
@@ -752,7 +750,7 @@ def main():
 
                     # Render Video Frame
                     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                    frame_window.image(image_rgb, channels="RGB", width="stretch")
+                    frame_window.image(image_rgb, channels="RGB", use_container_width=True)
 
                     # Update Output Display Cards
                     if is_sos:
