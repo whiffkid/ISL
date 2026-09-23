@@ -216,7 +216,7 @@ def render_header():
     c2.badge("Two-handed ISL", icon=":material/sign_language:", color="green")
     c3.badge("10 Indic languages", icon=":material/g_translate:", color="orange")
     c4.badge("AI posture coach", icon=":material/school:", color="purple")
-    st.space(12)
+    st.markdown("<div style='margin-top:12px'></div>", unsafe_allow_html=True)
 
 
 def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
