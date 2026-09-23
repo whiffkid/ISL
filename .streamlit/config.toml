@@ -8,27 +8,5 @@ base = "dark"
 primaryColor = "#38bdf8"
 backgroundColor = "#0f172a"
 secondaryBackgroundColor = "#1e293b"
-codeBackgroundColor = "#090d16"
 textColor = "#f1f5f9"
-linkColor = "#38bdf8"
-borderColor = "#334155"
-showWidgetBorder = true
-showSidebarBorder = true
-baseRadius = "10px"
-buttonRadius = "8px"
-font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
-codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
-codeFontSize = "13px"
-codeTextColor = "#f1f5f9"
-baseFontSize = 14
-baseFontWeight = 400
-headingFontSizes = ["30px", "22px", "18px", "15px", "13px", "12px"]
-headingFontWeights = [700, 600, 600, 500, 500, 500]
-linkUnderline = false
-chartCategoricalColors = ["#38bdf8", "#34d399", "#fbbf24", "#f87171", "#a78bfa", "#60a5fa", "#f472b6"]
-
-[theme.sidebar]
-backgroundColor = "#090d16"
-secondaryBackgroundColor = "#1e293b"
-codeBackgroundColor = "#0f172a"
-borderColor = "#1e293b"
+font = "sans serif"
