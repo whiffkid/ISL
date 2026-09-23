@@ -40,6 +40,13 @@ from isl_learning_guide import (
 )
 import mediapipe as mp
 
+# Prevent MediaPipe from attempting external model downloads on cloud environments
+try:
+    import mediapipe.python.solutions.holistic as _mp_h
+    _mp_h._download_oss_pose_landmark_model = lambda *args, **kwargs: None
+except Exception:
+    pass
+
 st.set_page_config(
     page_title="Universal Real-Time ISL Translation Studio",
     page_icon=":material/sign_language:",
@@ -358,6 +365,9 @@ def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
+                if not cap.isOpened():
+                    st.warning("⚠️ No camera device detected on server host. (Cloud environments require local camera streaming).")
+
                 mp_holistic = mp.solutions.holistic
                 if "tutor_stars" not in st.session_state:
                     st.session_state.tutor_stars = 0
@@ -365,7 +375,7 @@ def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
                     st.session_state.high_score_streak = 0
 
                 with mp_holistic.Holistic(
-                    model_complexity=complexity,
+                    model_complexity=1,
                     min_detection_confidence=0.5,
                     min_tracking_confidence=0.5,
                     refine_face_landmarks=False
@@ -660,6 +670,9 @@ def main():
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
+            if not cap.isOpened():
+                st.warning("⚠️ No camera device detected on server host. (Cloud environments require local camera streaming).")
+
             mp_holistic = mp.solutions.holistic
             sequence = []
             frame_idx = 0
@@ -673,7 +686,7 @@ def main():
             mode_key = "hybrid" if mode_choice == "Hybrid" else ("sign" if mode_choice == "Sign sequences" else "spell")
 
             with mp_holistic.Holistic(
-                model_complexity=complexity,
+                model_complexity=1,
                 min_detection_confidence=0.5,
                 min_tracking_confidence=0.5,
                 refine_face_landmarks=False
