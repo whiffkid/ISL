@@ -14,10 +14,34 @@ for venv_site in glob.glob(os.path.join(base_dir, "venv*", "lib*", py_ver, "site
 
 import time
 import json
+import threading
 import numpy as np
 import cv2
 import streamlit as st
 import tensorflow as tf
+
+try:
+    from streamlit_webrtc import (
+        webrtc_streamer,
+        WebRtcMode,
+        RTCConfiguration,
+        VideoProcessorBase
+    )
+    import av
+    HAS_WEBRTC = True
+except ImportError:
+    HAS_WEBRTC = False
+    VideoProcessorBase = object
+
+RTC_CONFIG = RTCConfiguration(
+    {
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+            {"urls": ["stun:stun2.l.google.com:19302"]}
+        ]
+    }
+) if HAS_WEBRTC else None
 
 from utils import (
     mediapipe_detection,
@@ -210,6 +234,221 @@ def load_sign_model(model_name="bilstm_attention"):
     return model, actions
 
 
+class ISLTranslationVideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.model = None
+        self.actions = []
+        self.spell_engine = None
+        self.mode = "hybrid"
+        self.left_handed = False
+        self.threshold = 0.55
+        self.sequence = []
+        self.frame_idx = 0
+        self.cooldown = 0
+        self.rolling_preds = []
+
+        # Shared output states
+        self.latest_sign = None
+        self.latest_confidence = 0.0
+        self.new_words = []
+        self.current_spelled = ""
+        self.suggestions = []
+        self.is_sos = False
+
+        self.holistic = mp.solutions.holistic.Holistic(
+            model_complexity=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+            refine_face_landmarks=False
+        )
+
+    def update_config(self, model, actions, spell_engine, mode, left_handed, threshold):
+        with self.lock:
+            self.model = model
+            self.actions = actions
+            self.spell_engine = spell_engine
+            self.mode = mode
+            self.left_handed = left_handed
+            self.threshold = threshold
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        if img is None:
+            return frame
+
+        # Mirror for natural webcam experience
+        img = cv2.flip(img, 1)
+
+        # Scale down if camera resolution is higher than 640px to ensure fast processing
+        h, w = img.shape[:2]
+        if w > 640:
+            scale = 640.0 / w
+            img = cv2.resize(img, (640, int(h * scale)))
+            h, w = img.shape[:2]
+
+        with self.lock:
+            mode = self.mode
+            left_handed = self.left_handed
+            threshold = self.threshold
+            model = self.model
+            actions = self.actions
+            spell_engine = self.spell_engine
+
+        self.frame_idx += 1
+        img, results = mediapipe_detection(img, self.holistic)
+        draw_styled_landmarks(img, results)
+
+        hand_active = is_hand_active(results)
+        keypoints = landmarks_data(results, left_handed=left_handed)
+        self.sequence.append(keypoints)
+        self.sequence = self.sequence[-60:]
+
+        # Dynamic Sign Recognition
+        if mode in ["sign", "hybrid"] and model is not None and len(actions) > 0:
+            self.cooldown = max(0, self.cooldown - 1)
+            if len(self.sequence) == 60 and (self.frame_idx % 2 == 0) and hand_active and self.cooldown == 0:
+                try:
+                    sampled = np.array(self.sequence)[::2]
+                    input_seq = np.expand_dims(sampled, axis=0)
+                    raw_preds = model(input_seq, training=False).numpy()[0]
+                    self.rolling_preds.append(raw_preds)
+                    if len(self.rolling_preds) > 3:
+                        self.rolling_preds = self.rolling_preds[-3:]
+                    preds = np.mean(self.rolling_preds, axis=0)
+                    max_idx = int(np.argmax(preds))
+                    conf = float(preds[max_idx])
+                    if conf > threshold and max_idx < len(actions):
+                        act = actions[max_idx]
+                        self.cooldown = 18
+                        self.sequence = self.sequence[-16:]
+                        self.rolling_preds = []
+                        with self.lock:
+                            self.latest_sign = act
+                            self.latest_confidence = conf
+                            self.new_words.append(act)
+                            if is_emergency_sign(act):
+                                self.is_sos = True
+                except Exception:
+                    pass
+
+        # Fingerspelling Recognition
+        if mode in ["spell", "hybrid"] and spell_engine is not None and hand_active:
+            try:
+                char, curr_word, is_new = spell_engine.update_stream(results)
+                with self.lock:
+                    self.current_spelled = curr_word
+                    if is_new:
+                        self.suggestions = spell_engine.get_word_suggestions(max_suggestions=3)
+            except Exception:
+                pass
+        elif spell_engine is not None and not spell_engine.current_word:
+            with self.lock:
+                self.current_spelled = ""
+                self.suggestions = []
+
+        # Draw HUD bar
+        overlay = img.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 48), (15, 23, 42), -1)
+        cv2.addWeighted(overlay, 0.75, img, 0.25, 0, img)
+
+        with self.lock:
+            latest_sign = self.latest_sign
+            latest_conf = self.latest_confidence
+            curr_spelled = self.current_spelled
+            sos_active = self.is_sos
+
+        dot_color = (74, 222, 128) if hand_active else (148, 163, 184)
+        cv2.circle(img, (20, 24), 6, dot_color, -1)
+        cv2.putText(img, f"MODE: {mode.upper()}", (34, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (241, 245, 249), 1, cv2.LINE_AA)
+
+        if sos_active:
+            cv2.rectangle(img, (0, h - 35), (w, h), (0, 0, 220), -1)
+            cv2.putText(img, "EMERGENCY / DISTRESS ALERT", (20, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        elif latest_sign:
+            sign_str = f"SIGN: {latest_sign.upper()} ({int(latest_conf * 100)}%)"
+            cv2.putText(img, sign_str, (max(180, w - 260), 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (56, 189, 248), 2, cv2.LINE_AA)
+        elif curr_spelled:
+            spell_str = f"SPELL: {curr_spelled.upper()}"
+            cv2.putText(img, spell_str, (max(180, w - 240), 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (251, 191, 36), 2, cv2.LINE_AA)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    def pull_state(self):
+        with self.lock:
+            words = list(self.new_words)
+            self.new_words.clear()
+            return {
+                "new_words": words,
+                "latest_sign": self.latest_sign,
+                "latest_confidence": self.latest_confidence,
+                "current_spelled": self.current_spelled,
+                "suggestions": list(self.suggestions),
+                "is_sos": self.is_sos
+            }
+
+    def clear(self):
+        with self.lock:
+            self.new_words.clear()
+            self.latest_sign = None
+            self.current_spelled = ""
+            self.suggestions.clear()
+            self.is_sos = False
+            self.sequence.clear()
+
+
+class TutorVideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.selected_symbol = "A"
+        self.accuracy = 0.0
+        self.status = "Waiting..."
+        self.hint = ""
+        self.checklist = []
+        self.holistic = mp.solutions.holistic.Holistic(
+            model_complexity=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+            refine_face_landmarks=False
+        )
+
+    def set_symbol(self, sym):
+        with self.lock:
+            self.selected_symbol = sym
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        if img is None:
+            return frame
+
+        img = cv2.flip(img, 1)
+        h, w = img.shape[:2]
+        if w > 640:
+            scale = 640.0 / w
+            img = cv2.resize(img, (640, int(h * scale)))
+
+        with self.lock:
+            sym = self.selected_symbol
+
+        img, results = mediapipe_detection(img, self.holistic)
+        draw_styled_landmarks(img, results)
+
+        eval_res = evaluate_hand_posture(results, sym)
+        draw_tutor_camera_overlay(img, eval_res, sym)
+
+        with self.lock:
+            self.accuracy = eval_res.get('accuracy', 0.0)
+            self.status = eval_res.get('status', 'Waiting')
+            self.hint = eval_res.get('primary_hint', '')
+            self.checklist = eval_res.get('checklist', [])
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+    def get_eval(self):
+        with self.lock:
+            return self.accuracy, self.status, self.hint, list(self.checklist)
+
+
 def render_header():
     st.markdown("""
     <div class="hero-container">
@@ -343,16 +582,49 @@ def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
 
             col_toggle, col_stars = st.columns([2, 1])
             with col_toggle:
-                run_tutor_cam = st.toggle("Start posture coach camera", value=False, key=f"tutor_cam_{selected_symbol}")
+                cam_mode_tutor = st.radio(
+                    "Tutor Camera Source",
+                    ["Browser Webcam (WebRTC - Cloud)", "Local Desktop (OpenCV Direct)"] if HAS_WEBRTC else ["Local Desktop (OpenCV Direct)"],
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key=f"tutor_cam_src_{selected_symbol}"
+                )
             with col_stars:
                 st.metric("Mastery stars", f"{st.session_state.get('tutor_stars', 0)} ⭐")
 
             score_progress = st.progress(0, text="Posture accuracy: 0%")
             hint_card = st.empty()
             checklist_placeholder = st.empty()
-            tutor_frame_window = st.image([])
 
-            if not run_tutor_cam:
+            if HAS_WEBRTC and cam_mode_tutor.startswith("Browser Webcam"):
+                st.caption("Click **START** below to practice directly using your browser camera.")
+                webrtc_tutor_ctx = webrtc_streamer(
+                    key=f"tutor_webrtc_stream_{selected_symbol}",
+                    mode=WebRtcMode.SENDRECV,
+                    rtc_configuration=RTC_CONFIG,
+                    video_processor_factory=TutorVideoProcessor,
+                    media_stream_constraints={"video": True, "audio": False},
+                    async_processing=True
+                )
+                if webrtc_tutor_ctx.video_processor:
+                    webrtc_tutor_ctx.video_processor.set_symbol(selected_symbol)
+                    acc, status, hint, checklist = webrtc_tutor_ctx.video_processor.get_eval()
+                    score_progress.progress(int(acc), text=f"Posture accuracy: {int(acc)}% ({status})")
+                    if hint:
+                        card_class = "coach-perfect" if status == "PERFECT" else ("coach-good" if status == "GOOD" else "coach-needs-work")
+                        hint_card.markdown(f"<div class='coach-box {card_class}'>{hint}</div>", unsafe_allow_html=True)
+                    if checklist:
+                        chk_md = "<b>Live Anatomical Checklist:</b><br>"
+                        for item in checklist:
+                            icon = "✅" if item.get('passed', False) else "❌"
+                            chk_md += f"{icon} <b>{item.get('label', '')}</b>: <span style='color:#94a3b8;'>{item.get('detail', '')}</span><br>"
+                        checklist_placeholder.markdown(f"<div class='anatomy-box' style='padding:12px 16px;'>{chk_md}</div>", unsafe_allow_html=True)
+                run_tutor_cam = False
+            else:
+                run_tutor_cam = st.toggle("Start posture coach camera", value=False, key=f"tutor_cam_{selected_symbol}")
+                tutor_frame_window = st.image([])
+
+            if not run_tutor_cam and not (HAS_WEBRTC and cam_mode_tutor.startswith("Browser Webcam")):
                 hint_card.markdown("""
                 <div class="coach-box coach-needs-work">
                     :material/info: Toggle the camera switch above when you're ready to practice this hand signal.
@@ -572,10 +844,31 @@ def main():
                     cam_badge_color = "green" if st.session_state.get("run_cam_state", False) else "gray"
                     st.badge(f"Feed {cam_state}", color=cam_badge_color)
 
-                run_camera = st.toggle("Enable translation camera", value=False, key="run_cam_toggle")
-                st.session_state.run_cam_state = run_camera
+                cam_stream_mode = st.radio(
+                    "Camera Stream Source",
+                    ["Browser Webcam (WebRTC - Recommended)", "Local Desktop (OpenCV Direct)"] if HAS_WEBRTC else ["Local Desktop (OpenCV Direct)"],
+                    horizontal=True,
+                    label_visibility="collapsed"
+                )
 
-                frame_window = st.image([])
+                webrtc_ctx = None
+                run_camera = False
+
+                if HAS_WEBRTC and cam_stream_mode.startswith("Browser Webcam"):
+                    st.caption("Click **START** below to enable real-time video streaming directly from your browser.")
+                    webrtc_ctx = webrtc_streamer(
+                        key="isl_main_webrtc_stream",
+                        mode=WebRtcMode.SENDRECV,
+                        rtc_configuration=RTC_CONFIG,
+                        video_processor_factory=ISLTranslationVideoProcessor,
+                        media_stream_constraints={"video": True, "audio": False},
+                        async_processing=True
+                    )
+                    st.session_state.run_cam_state = bool(webrtc_ctx and webrtc_ctx.state.playing)
+                else:
+                    run_camera = st.toggle("Enable translation camera", value=False, key="run_cam_toggle")
+                    st.session_state.run_cam_state = run_camera
+                    frame_window = st.image([])
 
                 # Recognition Mode Switcher & Quick Actions Bar
                 col_mode_label, col_mode_ctrl = st.columns([1, 2])
@@ -593,16 +886,47 @@ def main():
                 act_col1, act_col2, act_col3 = st.columns(3)
                 if act_col1.button("Backspace", icon=":material/backspace:"):
                     spell_engine.backspace()
+                    if webrtc_ctx and webrtc_ctx.video_processor:
+                        with webrtc_ctx.video_processor.lock:
+                            webrtc_ctx.video_processor.current_spelled = spell_engine.current_word
                     st.rerun()
                 if act_col2.button("Add space", icon=":material/space_bar:"):
                     if spell_engine.current_word and not spell_engine.current_word.endswith(" "):
                         spell_engine.current_word += " "
+                        if webrtc_ctx and webrtc_ctx.video_processor:
+                            with webrtc_ctx.video_processor.lock:
+                                webrtc_ctx.video_processor.current_spelled = spell_engine.current_word
                     st.rerun()
                 if act_col3.button("Clear session", icon=":material/delete:"):
                     st.session_state.session_words = []
                     spell_engine.clear()
                     st.session_state.last_sentence = ""
+                    if webrtc_ctx and webrtc_ctx.video_processor:
+                        webrtc_ctx.video_processor.clear()
                     st.rerun()
+
+        mode_key = "hybrid" if mode_choice == "Hybrid" else ("sign" if mode_choice == "Sign sequences" else "spell")
+        suggestions = []
+
+        if webrtc_ctx and webrtc_ctx.video_processor:
+            webrtc_ctx.video_processor.update_config(
+                model=model,
+                actions=actions,
+                spell_engine=spell_engine,
+                mode=mode_key,
+                left_handed=left_handed,
+                threshold=confidence_thresh
+            )
+            state_data = webrtc_ctx.video_processor.pull_state()
+            for w in state_data["new_words"]:
+                if not st.session_state.session_words or w != st.session_state.session_words[-1]:
+                    st.session_state.session_words.append(w)
+                    if len(st.session_state.session_words) > 8:
+                        st.session_state.session_words = st.session_state.session_words[-8:]
+            if state_data["current_spelled"]:
+                spell_engine.current_word = state_data["current_spelled"]
+            if state_data["suggestions"]:
+                suggestions = state_data["suggestions"]
 
         # RIGHT COLUMN: Translation & Speech Center
         with col_output:
@@ -800,6 +1124,53 @@ def main():
                         suggestions_placeholder.empty()
 
                 cap.release()
+
+        if not run_camera:
+            full_gloss = list(st.session_state.session_words)
+            if spell_engine.current_word.strip():
+                full_gloss.append(spell_engine.current_word.strip())
+
+            if full_gloss:
+                translated_text, eng_text = grammar_engine.translate(full_gloss, target_lang=target_lang)
+                if translated_text and translated_text != st.session_state.last_sentence:
+                    st.session_state.last_sentence = translated_text
+                    st.session_state.transcript_recorder.add_entry(full_gloss, translated_text)
+            else:
+                translated_text = ""
+
+            is_sos = any(is_emergency_sign(w) for w in st.session_state.session_words)
+            if is_sos:
+                emergency_placeholder.markdown("""
+                <div class="emergency-alert">
+                    :material/emergency: <b>EMERGENCY / DISTRESS SIGN DETECTED</b>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                emergency_placeholder.empty()
+
+            trans_display = translated_text if translated_text else "Waiting for signs..."
+            translation_placeholder.markdown(f"""
+            <div class="trans-card">
+                <div class="trans-lang-tag">{supported_langs.get(target_lang, 'TRANSLATION')}</div>
+                <div class="trans-output">{trans_display}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            gloss_chips = "".join([f"<span class='gloss-chip'>{w}</span>" for w in st.session_state.session_words])
+            spelled_chip = f"<span class='spelled-chip'>✍️ {spell_engine.current_word}</span>" if spell_engine.current_word else ""
+            gloss_placeholder.markdown(f"""
+            <div class="gloss-chip-container">
+                <span style="color:#94a3b8; font-size:0.85rem; font-weight:600;">Glosses:</span>
+                {gloss_chips if gloss_chips else "<span style='color:#64748b;'>None</span>"}
+                {spelled_chip}
+            </div>
+            """, unsafe_allow_html=True)
+
+            if suggestions:
+                sug_str = " ".join([f"<span class='spelled-chip' style='background:#1e293b; color:#38bdf8; border-color:#0284c7;'>{w}</span>" for w in suggestions])
+                suggestions_placeholder.markdown(f"<div style='margin-top:8px;'><span style='color:#94a3b8; font-size:0.85rem;'>Suggestions:</span> {sug_str}</div>", unsafe_allow_html=True)
+            else:
+                suggestions_placeholder.empty()
 
     with tab_learn:
         render_learn_tab(complexity=complexity, left_handed=left_handed, enable_tts=enable_tts)
