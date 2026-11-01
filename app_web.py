@@ -33,15 +33,55 @@ except ImportError:
     HAS_WEBRTC = False
     VideoProcessorBase = object
 
-RTC_CONFIG = RTCConfiguration(
-    {
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            {"urls": ["stun:stun1.l.google.com:19302"]},
-            {"urls": ["stun:stun2.l.google.com:19302"]}
-        ]
-    }
-) if HAS_WEBRTC else None
+def get_rtc_configuration():
+    """Build RTCConfiguration with robust STUN and TURN fallback for cloud deployment."""
+    if not HAS_WEBRTC:
+        return None
+
+    ice_servers = [
+        {
+            "urls": [
+                "stun:stun.l.google.com:19302",
+                "stun:stun1.l.google.com:19302",
+                "stun:stun2.l.google.com:19302",
+                "stun:stun3.l.google.com:19302",
+                "stun:stun4.l.google.com:19302",
+            ]
+        }
+    ]
+
+    # Check Streamlit secrets for custom TURN credentials
+    custom_turn_loaded = False
+    try:
+        if hasattr(st, "secrets") and "webrtc" in st.secrets:
+            webrtc_sec = st.secrets["webrtc"]
+            turn_entry = {"urls": webrtc_sec.get("turn_url", "turn:openrelay.metered.ca:80")}
+            if "turn_username" in webrtc_sec:
+                turn_entry["username"] = webrtc_sec["turn_username"]
+            if "turn_credential" in webrtc_sec:
+                turn_entry["credential"] = webrtc_sec["turn_credential"]
+            ice_servers.append(turn_entry)
+            custom_turn_loaded = True
+    except Exception:
+        pass
+
+    # Free OpenRelay TURN servers for NAT traversal on Streamlit Cloud & strict networks
+    if not custom_turn_loaded:
+        ice_servers.append({
+            "urls": [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turn:openrelay.metered.ca:443?transport=tcp",
+                "turns:openrelay.metered.ca:443?transport=tcp",
+            ],
+            "username": "openrelayproject",
+            "credential": "openrelayproject"
+        })
+
+    return RTCConfiguration({"iceServers": ice_servers})
+
+
+RTC_CONFIG = get_rtc_configuration()
 
 from utils import (
     mediapipe_detection,
@@ -273,106 +313,109 @@ class ISLTranslationVideoProcessor(VideoProcessorBase):
             self.threshold = threshold
 
     def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        if img is None:
-            return frame
+        try:
+            img = frame.to_ndarray(format="bgr24")
+            if img is None:
+                return frame
 
-        # Mirror for natural webcam experience
-        img = cv2.flip(img, 1)
+            # Mirror for natural webcam experience
+            img = cv2.flip(img, 1)
 
-        # Scale down if camera resolution is higher than 640px to ensure fast processing
-        h, w = img.shape[:2]
-        if w > 640:
-            scale = 640.0 / w
-            img = cv2.resize(img, (640, int(h * scale)))
+            # Scale down if camera resolution is higher than 640px to ensure fast processing
             h, w = img.shape[:2]
+            if w > 640:
+                scale = 640.0 / w
+                img = cv2.resize(img, (640, int(h * scale)))
+                h, w = img.shape[:2]
 
-        with self.lock:
-            mode = self.mode
-            left_handed = self.left_handed
-            threshold = self.threshold
-            model = self.model
-            actions = self.actions
-            spell_engine = self.spell_engine
+            with self.lock:
+                mode = self.mode
+                left_handed = self.left_handed
+                threshold = self.threshold
+                model = self.model
+                actions = self.actions
+                spell_engine = self.spell_engine
 
-        self.frame_idx += 1
-        img, results = mediapipe_detection(img, self.holistic)
-        draw_styled_landmarks(img, results)
+            self.frame_idx += 1
+            img, results = mediapipe_detection(img, self.holistic)
+            draw_styled_landmarks(img, results)
 
-        hand_active = is_hand_active(results)
-        keypoints = landmarks_data(results, left_handed=left_handed)
-        self.sequence.append(keypoints)
-        self.sequence = self.sequence[-60:]
+            hand_active = is_hand_active(results)
+            keypoints = landmarks_data(results, left_handed=left_handed)
+            self.sequence.append(keypoints)
+            self.sequence = self.sequence[-60:]
 
-        # Dynamic Sign Recognition
-        if mode in ["sign", "hybrid"] and model is not None and len(actions) > 0:
-            self.cooldown = max(0, self.cooldown - 1)
-            if len(self.sequence) == 60 and (self.frame_idx % 2 == 0) and hand_active and self.cooldown == 0:
+            # Dynamic Sign Recognition
+            if mode in ["sign", "hybrid"] and model is not None and len(actions) > 0:
+                self.cooldown = max(0, self.cooldown - 1)
+                if len(self.sequence) == 60 and (self.frame_idx % 2 == 0) and hand_active and self.cooldown == 0:
+                    try:
+                        sampled = np.array(self.sequence)[::2]
+                        input_seq = np.expand_dims(sampled, axis=0)
+                        raw_preds = model(input_seq, training=False).numpy()[0]
+                        self.rolling_preds.append(raw_preds)
+                        if len(self.rolling_preds) > 3:
+                            self.rolling_preds = self.rolling_preds[-3:]
+                        preds = np.mean(self.rolling_preds, axis=0)
+                        max_idx = int(np.argmax(preds))
+                        conf = float(preds[max_idx])
+                        if conf > threshold and max_idx < len(actions):
+                            act = actions[max_idx]
+                            self.cooldown = 18
+                            self.sequence = self.sequence[-16:]
+                            self.rolling_preds = []
+                            with self.lock:
+                                self.latest_sign = act
+                                self.latest_confidence = conf
+                                self.new_words.append(act)
+                                if is_emergency_sign(act):
+                                    self.is_sos = True
+                    except Exception:
+                        pass
+
+            # Fingerspelling Recognition
+            if mode in ["spell", "hybrid"] and spell_engine is not None and hand_active:
                 try:
-                    sampled = np.array(self.sequence)[::2]
-                    input_seq = np.expand_dims(sampled, axis=0)
-                    raw_preds = model(input_seq, training=False).numpy()[0]
-                    self.rolling_preds.append(raw_preds)
-                    if len(self.rolling_preds) > 3:
-                        self.rolling_preds = self.rolling_preds[-3:]
-                    preds = np.mean(self.rolling_preds, axis=0)
-                    max_idx = int(np.argmax(preds))
-                    conf = float(preds[max_idx])
-                    if conf > threshold and max_idx < len(actions):
-                        act = actions[max_idx]
-                        self.cooldown = 18
-                        self.sequence = self.sequence[-16:]
-                        self.rolling_preds = []
-                        with self.lock:
-                            self.latest_sign = act
-                            self.latest_confidence = conf
-                            self.new_words.append(act)
-                            if is_emergency_sign(act):
-                                self.is_sos = True
+                    char, curr_word, is_new = spell_engine.update_stream(results)
+                    with self.lock:
+                        self.current_spelled = curr_word
+                        if is_new:
+                            self.suggestions = spell_engine.get_word_suggestions(max_suggestions=3)
                 except Exception:
                     pass
-
-        # Fingerspelling Recognition
-        if mode in ["spell", "hybrid"] and spell_engine is not None and hand_active:
-            try:
-                char, curr_word, is_new = spell_engine.update_stream(results)
+            elif spell_engine is not None and not spell_engine.current_word:
                 with self.lock:
-                    self.current_spelled = curr_word
-                    if is_new:
-                        self.suggestions = spell_engine.get_word_suggestions(max_suggestions=3)
-            except Exception:
-                pass
-        elif spell_engine is not None and not spell_engine.current_word:
+                    self.current_spelled = ""
+                    self.suggestions = []
+
+            # Draw HUD bar
+            overlay = img.copy()
+            cv2.rectangle(overlay, (0, 0), (w, 48), (15, 23, 42), -1)
+            cv2.addWeighted(overlay, 0.75, img, 0.25, 0, img)
+
             with self.lock:
-                self.current_spelled = ""
-                self.suggestions = []
+                latest_sign = self.latest_sign
+                latest_conf = self.latest_confidence
+                curr_spelled = self.current_spelled
+                sos_active = self.is_sos
 
-        # Draw HUD bar
-        overlay = img.copy()
-        cv2.rectangle(overlay, (0, 0), (w, 48), (15, 23, 42), -1)
-        cv2.addWeighted(overlay, 0.75, img, 0.25, 0, img)
+            dot_color = (74, 222, 128) if hand_active else (148, 163, 184)
+            cv2.circle(img, (20, 24), 6, dot_color, -1)
+            cv2.putText(img, f"MODE: {mode.upper()}", (34, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (241, 245, 249), 1, cv2.LINE_AA)
 
-        with self.lock:
-            latest_sign = self.latest_sign
-            latest_conf = self.latest_confidence
-            curr_spelled = self.current_spelled
-            sos_active = self.is_sos
+            if sos_active:
+                cv2.rectangle(img, (0, h - 35), (w, h), (0, 0, 220), -1)
+                cv2.putText(img, "EMERGENCY / DISTRESS ALERT", (20, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            elif latest_sign:
+                sign_str = f"SIGN: {latest_sign.upper()} ({int(latest_conf * 100)}%)"
+                cv2.putText(img, sign_str, (max(180, w - 260), 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (56, 189, 248), 2, cv2.LINE_AA)
+            elif curr_spelled:
+                spell_str = f"SPELL: {curr_spelled.upper()}"
+                cv2.putText(img, spell_str, (max(180, w - 240), 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (251, 191, 36), 2, cv2.LINE_AA)
 
-        dot_color = (74, 222, 128) if hand_active else (148, 163, 184)
-        cv2.circle(img, (20, 24), 6, dot_color, -1)
-        cv2.putText(img, f"MODE: {mode.upper()}", (34, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (241, 245, 249), 1, cv2.LINE_AA)
-
-        if sos_active:
-            cv2.rectangle(img, (0, h - 35), (w, h), (0, 0, 220), -1)
-            cv2.putText(img, "EMERGENCY / DISTRESS ALERT", (20, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-        elif latest_sign:
-            sign_str = f"SIGN: {latest_sign.upper()} ({int(latest_conf * 100)}%)"
-            cv2.putText(img, sign_str, (max(180, w - 260), 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (56, 189, 248), 2, cv2.LINE_AA)
-        elif curr_spelled:
-            spell_str = f"SPELL: {curr_spelled.upper()}"
-            cv2.putText(img, spell_str, (max(180, w - 240), 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (251, 191, 36), 2, cv2.LINE_AA)
-
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+        except Exception as e:
+            return frame
 
     def pull_state(self):
         with self.lock:
@@ -417,32 +460,35 @@ class TutorVideoProcessor(VideoProcessorBase):
             self.selected_symbol = sym
 
     def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        if img is None:
+        try:
+            img = frame.to_ndarray(format="bgr24")
+            if img is None:
+                return frame
+
+            img = cv2.flip(img, 1)
+            h, w = img.shape[:2]
+            if w > 640:
+                scale = 640.0 / w
+                img = cv2.resize(img, (640, int(h * scale)))
+
+            with self.lock:
+                sym = self.selected_symbol
+
+            img, results = mediapipe_detection(img, self.holistic)
+            draw_styled_landmarks(img, results)
+
+            eval_res = evaluate_hand_posture(results, sym)
+            draw_tutor_camera_overlay(img, eval_res, sym)
+
+            with self.lock:
+                self.accuracy = eval_res.get('accuracy', 0.0)
+                self.status = eval_res.get('status', 'Waiting')
+                self.hint = eval_res.get('primary_hint', '')
+                self.checklist = eval_res.get('checklist', [])
+
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+        except Exception as e:
             return frame
-
-        img = cv2.flip(img, 1)
-        h, w = img.shape[:2]
-        if w > 640:
-            scale = 640.0 / w
-            img = cv2.resize(img, (640, int(h * scale)))
-
-        with self.lock:
-            sym = self.selected_symbol
-
-        img, results = mediapipe_detection(img, self.holistic)
-        draw_styled_landmarks(img, results)
-
-        eval_res = evaluate_hand_posture(results, sym)
-        draw_tutor_camera_overlay(img, eval_res, sym)
-
-        with self.lock:
-            self.accuracy = eval_res.get('accuracy', 0.0)
-            self.status = eval_res.get('status', 'Waiting')
-            self.hint = eval_res.get('primary_hint', '')
-            self.checklist = eval_res.get('checklist', [])
-
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
     def get_eval(self):
         with self.lock:
