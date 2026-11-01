@@ -18,6 +18,16 @@ import threading
 import numpy as np
 import cv2
 import streamlit as st
+
+st.set_page_config(
+    page_title="Universal Real-Time ISL Translation Studio",
+    page_icon=":material/sign_language:",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+
+
 import tensorflow as tf
 
 try:
@@ -124,12 +134,7 @@ try:
 except Exception:
     pass
 
-st.set_page_config(
-    page_title="Universal Real-Time ISL Translation Studio",
-    page_icon=":material/sign_language:",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+
 
 # Polished Modern Dark Theme Styles
 st.markdown("""
