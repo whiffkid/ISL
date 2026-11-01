@@ -38,6 +38,19 @@ def get_rtc_configuration():
     if not HAS_WEBRTC:
         return None
 
+    # 1. Check for Twilio Network Traversal credentials in Streamlit secrets (Official Streamlit Cloud standard)
+    try:
+        if hasattr(st, "secrets") and "TWILIO_ACCOUNT_SID" in st.secrets and "TWILIO_AUTH_TOKEN" in st.secrets:
+            from streamlit_webrtc import get_twilio_ice_servers
+            twilio_servers = get_twilio_ice_servers(
+                account_sid=st.secrets["TWILIO_ACCOUNT_SID"],
+                auth_token=st.secrets["TWILIO_AUTH_TOKEN"]
+            )
+            if twilio_servers:
+                return RTCConfiguration({"iceServers": twilio_servers})
+    except Exception:
+        pass
+
     ice_servers = [
         {
             "urls": [
@@ -50,7 +63,7 @@ def get_rtc_configuration():
         }
     ]
 
-    # Check Streamlit secrets for custom TURN credentials
+    # 2. Check Streamlit secrets for custom TURN credentials
     custom_turn_loaded = False
     try:
         if hasattr(st, "secrets") and "webrtc" in st.secrets:
@@ -65,7 +78,7 @@ def get_rtc_configuration():
     except Exception:
         pass
 
-    # Free OpenRelay TURN servers for NAT traversal on Streamlit Cloud & strict networks
+    # 3. Free OpenRelay TURN servers fallback
     if not custom_turn_loaded:
         ice_servers.append({
             "urls": [
