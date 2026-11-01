@@ -643,7 +643,7 @@ def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
             with col_toggle:
                 cam_mode_tutor = st.radio(
                     "Tutor Camera Source",
-                    ["Browser Camera (Native Cloud - 100% Reliable)", "Browser Video Stream (WebRTC)", "Local Desktop (OpenCV Direct)"],
+                    ["Browser Webcam (WebRTC - Recommended)", "Local Desktop (OpenCV Direct)"] if HAS_WEBRTC else ["Local Desktop (OpenCV Direct)"],
                     horizontal=True,
                     label_visibility="collapsed",
                     key=f"tutor_cam_src_{selected_symbol}"
@@ -655,72 +655,8 @@ def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
             hint_card = st.empty()
             checklist_placeholder = st.empty()
 
-            if cam_mode_tutor.startswith("Browser Camera (Native Cloud"):
-                col_tut_cap, col_tut_tgl = st.columns([3, 1])
-                with col_tut_cap:
-                    st.caption("Capture your hand posture to get instant AI posture evaluation.")
-                with col_tut_tgl:
-                    tutor_cam_on = st.toggle("Camera", value=True, key=f"tutor_cam_power_{selected_symbol}", help="Turn the camera ON or OFF")
-
-                if tutor_cam_on:
-                    tutor_photo = st.camera_input(f"Capture posture for {selected_symbol}", key=f"tutor_cam_in_{selected_symbol}")
-                    if tutor_photo is not None:
-                        bytes_data = tutor_photo.getvalue()
-                        img_arr = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-                        img_arr = cv2.flip(img_arr, 1)
-
-                        with mp.solutions.holistic.Holistic(
-                            model_complexity=0,
-                            min_detection_confidence=0.5,
-                            min_tracking_confidence=0.5,
-                            refine_face_landmarks=False
-                        ) as holistic_tutor:
-                            img_arr, results = mediapipe_detection(img_arr, holistic_tutor)
-                            draw_styled_landmarks(img_arr, results)
-                            eval_res = evaluate_hand_posture(results, selected_symbol)
-                            draw_tutor_camera_overlay(img_arr, eval_res, selected_symbol)
-
-                            acc = eval_res.get('accuracy', 0.0)
-                            status = eval_res.get('status', 'Waiting')
-                            hint = eval_res.get('primary_hint', '')
-                            checklist = eval_res.get('checklist', [])
-
-                            if acc >= 80:
-                                st.session_state.tutor_stars = st.session_state.get("tutor_stars", 0) + 1
-
-                            score_progress.progress(int(acc), text=f"Posture accuracy: {int(acc)}% ({status})")
-                            card_class = "coach-perfect" if status == "PERFECT" else ("coach-good" if status == "GOOD" else "coach-needs-work")
-                            if status == "PERFECT":
-                                hint_msg = f"🎉 <b>100% CORRECT!</b> Excellent form for {selected_symbol}."
-                            elif status == "GOOD":
-                                hint_msg = f"👍 <b>GOOD FORM ({int(acc)}%)!</b> {hint}"
-                            else:
-                                hint_msg = f"💪 <b>NEEDS ADJUSTMENT ({int(acc)}%):</b> {hint}"
-                            hint_card.markdown(f"<div class='coach-box {card_class}'>{hint_msg}</div>", unsafe_allow_html=True)
-
-                            if checklist:
-                                chk_md = "<b>Live Anatomical Checklist:</b><br>"
-                                for item in checklist:
-                                    icon = "✅" if item.get('passed', False) else "❌"
-                                    chk_md += f"{icon} <b>{item.get('label', '')}</b>: <span style='color:#94a3b8;'>{item.get('detail', '')}</span><br>"
-                                checklist_placeholder.markdown(f"<div class='anatomy-box' style='padding:12px 16px;'>{chk_md}</div>", unsafe_allow_html=True)
-
-                            st.image(cv2.cvtColor(img_arr, cv2.COLOR_BGR2RGB), caption=f"Analyzed posture for {selected_symbol} ({status} - {int(acc)}%)", use_container_width=True)
-                    else:
-                        hint_card.markdown(f"""
-                        <div class="coach-box coach-needs-work">
-                            📸 Hold your hand pose for <b>Number {selected_symbol}</b> in the camera preview and click <b>Take Photo</b> below to check your accuracy.
-                        </div>
-                        """, unsafe_allow_html=True)
-                else:
-                    hint_card.markdown("""
-                    <div class="coach-box coach-needs-work">
-                        📷 Camera is turned off. Toggle the switch above to turn it back on.
-                    </div>
-                    """, unsafe_allow_html=True)
-                run_tutor_cam = False
-            elif HAS_WEBRTC and cam_mode_tutor.startswith("Browser Video Stream"):
-                st.caption("Click **START** below to practice directly using continuous video stream.")
+            if HAS_WEBRTC and cam_mode_tutor.startswith("Browser Webcam"):
+                st.caption("Click **START** below to practice directly using your live browser camera.")
                 webrtc_tutor_ctx = webrtc_streamer(
                     key=f"tutor_webrtc_stream_{selected_symbol}",
                     mode=WebRtcMode.SENDRECV,
@@ -968,7 +904,7 @@ def main():
 
                 cam_stream_mode = st.radio(
                     "Camera Stream Source",
-                    ["Browser Camera (Native Cloud - 100% Reliable)", "Browser Video Stream (WebRTC)", "Local Desktop (OpenCV Direct)"],
+                    ["Browser Webcam (WebRTC - Recommended)", "Local Desktop (OpenCV Direct)"] if HAS_WEBRTC else ["Local Desktop (OpenCV Direct)"],
                     horizontal=True,
                     label_visibility="collapsed"
                 )
@@ -976,64 +912,8 @@ def main():
                 webrtc_ctx = None
                 run_camera = False
 
-                if cam_stream_mode.startswith("Browser Camera (Native Cloud"):
-                    col_cloud_cap, col_cloud_pwr = st.columns([3, 1])
-                    with col_cloud_cap:
-                        st.caption("Capture sign language gestures or fingerspelling directly from your browser camera.")
-                    with col_cloud_pwr:
-                        live_cam_pwr = st.toggle("Camera", value=True, key="live_cam_power_toggle", help="Turn the camera ON or OFF")
-
-                    if live_cam_pwr:
-                        cloud_cam_photo = st.camera_input("Capture sign gesture", key="isl_cloud_cam_photo")
-                        if cloud_cam_photo is not None:
-                            bytes_data = cloud_cam_photo.getvalue()
-                            img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
-                            img = cv2.flip(img, 1)
-
-                            with mp.solutions.holistic.Holistic(
-                                model_complexity=0,
-                                min_detection_confidence=0.5,
-                                min_tracking_confidence=0.5,
-                                refine_face_landmarks=False
-                            ) as holistic_cam:
-                                img, results = mediapipe_detection(img, holistic_cam)
-                                draw_styled_landmarks(img, results)
-                                hand_active = is_hand_active(results)
-
-                                detected_label = None
-                                # Fingerspelling
-                                if mode_choice in ["Fingerspelling", "Hybrid"] and spell_engine is not None:
-                                    char, curr_word, is_new = spell_engine.update_stream(results)
-                                    if char:
-                                        detected_label = f"SPELL: {char}"
-                                        if not st.session_state.session_words or curr_word != st.session_state.session_words[-1]:
-                                            st.session_state.session_words.append(curr_word)
-
-                                # Dynamic Sign Model Prediction
-                                if not detected_label and mode_choice in ["Signs only", "Hybrid"] and model is not None and len(actions) > 0:
-                                    keypoints = landmarks_data(results, left_handed=left_handed)
-                                    try:
-                                        input_seq = np.expand_dims(np.tile(keypoints, (30, 1)), axis=0)
-                                        preds = model(input_seq, training=False).numpy()[0]
-                                        max_idx = int(np.argmax(preds))
-                                        conf = float(preds[max_idx])
-                                        if conf > confidence_thresh and max_idx < len(actions):
-                                            act = actions[max_idx]
-                                            detected_label = f"SIGN: {act} ({int(conf * 100)}%)"
-                                            if not st.session_state.session_words or act != st.session_state.session_words[-1]:
-                                                st.session_state.session_words.append(act)
-                                    except Exception:
-                                        pass
-
-                                st.session_state.run_cam_state = True
-                                st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), caption=detected_label or "Frame analyzed with MediaPipe", use_container_width=True)
-                        else:
-                            st.info("📸 Click **Take Photo** above when performing a sign to recognize and translate it.", icon=":material/photo_camera:")
-                    else:
-                        st.session_state.run_cam_state = False
-                        st.info("📷 Camera is turned off. Toggle the switch above to turn it back on.", icon=":material/videocam_off:")
-                elif HAS_WEBRTC and cam_stream_mode.startswith("Browser Video Stream"):
-                    st.caption("Click **START** below to enable continuous real-time video streaming.")
+                if HAS_WEBRTC and cam_stream_mode.startswith("Browser Webcam"):
+                    st.caption("Click **START** below to enable real-time video streaming directly from your browser.")
                     webrtc_ctx = webrtc_streamer(
                         key="isl_main_webrtc_stream",
                         mode=WebRtcMode.SENDRECV,
