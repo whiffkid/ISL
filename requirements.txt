@@ -12,3 +12,4 @@ deep-translator==1.11.4
 streamlit==1.45.1
 streamlit-webrtc
 av
+twilio

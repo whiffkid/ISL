@@ -43,23 +43,57 @@ except ImportError:
     HAS_WEBRTC = False
     VideoProcessorBase = object
 
+import base64
+import json
+import urllib.request
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_twilio_rest_ice_servers(account_sid: str, auth_token: str):
+    """Fetch ephemeral ICE servers directly from Twilio Network Traversal API without external dependencies."""
+    try:
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Tokens.json"
+        req = urllib.request.Request(url, data=b"", method="POST")
+        credentials = f"{account_sid}:{auth_token}"
+        encoded = base64.b64encode(credentials.encode("ascii")).decode("ascii")
+        req.add_header("Authorization", f"Basic {encoded}")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            servers = data.get("ice_servers", [])
+            formatted = []
+            for s in servers:
+                entry = {"urls": s.get("urls", s.get("url"))}
+                if "username" in s:
+                    entry["username"] = s["username"]
+                if "credential" in s:
+                    entry["credential"] = s["credential"]
+                formatted.append(entry)
+            return formatted
+    except Exception as e:
+        print(f"Twilio token REST error: {e}")
+        return None
+
+
 def get_rtc_configuration():
     """Build RTCConfiguration with robust STUN and TURN fallback for cloud deployment."""
     if not HAS_WEBRTC:
         return None
 
-    # 1. Check for Twilio Network Traversal credentials in Streamlit secrets (Official Streamlit Cloud standard)
-    try:
-        if hasattr(st, "secrets") and "TWILIO_ACCOUNT_SID" in st.secrets and "TWILIO_AUTH_TOKEN" in st.secrets:
-            from streamlit_webrtc import get_twilio_ice_servers
-            twilio_servers = get_twilio_ice_servers(
-                account_sid=st.secrets["TWILIO_ACCOUNT_SID"],
-                auth_token=st.secrets["TWILIO_AUTH_TOKEN"]
-            )
-            if twilio_servers:
-                return RTCConfiguration({"iceServers": twilio_servers})
-    except Exception:
-        pass
+    # 1. Check for Twilio Network Traversal credentials in Streamlit secrets
+    if hasattr(st, "secrets") and "TWILIO_ACCOUNT_SID" in st.secrets and "TWILIO_AUTH_TOKEN" in st.secrets:
+        sid = str(st.secrets["TWILIO_ACCOUNT_SID"]).strip().strip('"').strip("'")
+        token = str(st.secrets["TWILIO_AUTH_TOKEN"]).strip().strip('"').strip("'")
+        if sid and token:
+            try:
+                from streamlit_webrtc import get_twilio_ice_servers
+                twilio_servers = get_twilio_ice_servers(account_sid=sid, auth_token=token)
+                if twilio_servers:
+                    return RTCConfiguration({"iceServers": twilio_servers})
+            except Exception:
+                pass
+
+            rest_servers = fetch_twilio_rest_ice_servers(sid, token)
+            if rest_servers:
+                return RTCConfiguration({"iceServers": rest_servers})
 
     ice_servers = [
         {
@@ -665,7 +699,7 @@ def render_learn_tab(complexity=0, left_handed=False, enable_tts=True):
                 webrtc_tutor_ctx = webrtc_streamer(
                     key=f"tutor_webrtc_stream_{selected_symbol}",
                     mode=WebRtcMode.SENDRECV,
-                    rtc_configuration=RTC_CONFIG,
+                    rtc_configuration=get_rtc_configuration(),
                     video_processor_factory=TutorVideoProcessor,
                     media_stream_constraints={"video": True, "audio": False},
                     async_processing=True
@@ -922,7 +956,7 @@ def main():
                     webrtc_ctx = webrtc_streamer(
                         key="isl_main_webrtc_stream",
                         mode=WebRtcMode.SENDRECV,
-                        rtc_configuration=RTC_CONFIG,
+                        rtc_configuration=get_rtc_configuration(),
                         video_processor_factory=ISLTranslationVideoProcessor,
                         media_stream_constraints={"video": True, "audio": False},
                         async_processing=True
